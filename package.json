@@ -12,6 +12,7 @@
     "alb-log-parser": "0.0.3",
     "aws-sdk": "^2.487.0",
     "byline": "4.2.1",
+    "cloudfront-log-parser": "^1.0.0",
     "path": "0.12.7",
     "stream": "0.0.2"
   },

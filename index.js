@@ -18,7 +18,8 @@
 /* Imports */
 var AWS = require('aws-sdk');
 var LineStream = require('byline').LineStream;
-var parse = require('alb-log-parser');  // alb-log-parser  https://github.com/igtm/node-alb-log-parser
+var albParser = require('alb-log-parser');  // alb-log-parser  https://github.com/igtm/node-alb-log-parser
+var CloudFrontParser = require('cloudfront-log-parser');  // alb-log-parser  https://www.npmjs.com/package/cloudfront-log-parser
 var path = require('path');
 var stream = require('stream');
 const zlib = require('zlib');
@@ -35,6 +36,7 @@ const region = process.env['region'] || 'eu-west-1';
 const indexPrefix = process.env['index'] || 'elblogs';
 const index = indexPrefix + '-' + indexTimestamp; // adds a timestamp to index. Example: elblogs-2016.03.31
 const doctype = process.env['doctype'] || 'elb-access-logs';
+const logtype = process.env['logtype'] || 'alb';
 
 /* Globals */
 var s3 = new AWS.S3();
@@ -56,7 +58,7 @@ console.log('Initializing AWS Lambda Function');
  * Get the log file from the given S3 bucket and key.  Parse it and add
  * each log record to the ES domain.
  */
-function s3LogsToES(bucket, key, context, lineStream, recordStream) {
+function albLogsToES(bucket, key, context, lineStream, recordStream) {
     // Note: The Lambda function should be configured to filter for .log files
     // (as part of the Event Source "suffix" setting).
     if (!esEndpoint) {
@@ -67,15 +69,44 @@ function s3LogsToES(bucket, key, context, lineStream, recordStream) {
     var s3Stream = s3.getObject({Bucket: bucket, Key: key}).createReadStream();
 
     // Flow: S3 file stream -> Log Line stream -> Log Record stream -> ES
-     s3Stream
-      .pipe(zlib.createGunzip())
-      .pipe(lineStream)
-      .pipe(recordStream)
-      .on('data', function(parsedEntry) {
+    s3Stream
+        .pipe(zlib.createGunzip())
+        .pipe(lineStream)
+        .pipe(recordStream)
+        .on('data', function(parsedEntry) {
             postDocumentToES(parsedEntry, context);
-      });
+        });
 
-    s3Stream.on('error', function() {
+    s3Stream.on('error', function(e) {
+        console.log(e);
+        console.log(
+            'Error getting object "' + key + '" from bucket "' + bucket + '".  ' +
+            'Make sure they exist and your bucket is in the same region as this function.');
+        context.fail();
+    });
+}
+
+/*
+ * Get the log file from the given S3 bucket and key.  Parse it and add
+ * each log record to the ES domain.
+ */
+function cdnLogsToES(bucket, key, context, parser) {
+
+    // Note: The Lambda function should be configured to filter for .log files
+    // (as part of the Event Source "suffix" setting).
+    if (!esEndpoint) {
+      var error = new Error('ERROR: Environment variable es_endpoint not set')
+      context.fail(error);
+    }
+
+    const s3Stream = s3.getObject({Bucket: bucket, Key: key}).createReadStream();
+
+    s3Stream
+        .pipe(zlib.createGunzip())
+        .pipe(parser);
+
+    s3Stream.on('error', function(e) {
+        console.log(e);
         console.log(
             'Error getting object "' + key + '" from bucket "' + bucket + '".  ' +
             'Make sure they exist and your bucket is in the same region as this function.');
@@ -130,27 +161,43 @@ function postDocumentToES(doc, context) {
 /* Lambda "main": Execution starts here */
 exports.handler = function(event, context) {
     console.log('Received event: ', JSON.stringify(event, null, 2));
+    
 
-    /* == Streams ==
-    * To avoid loading an entire (typically large) log file into memory,
-    * this is implemented as a pipeline of filters, streaming log data
-    * from S3 to ES.
-    * Flow: S3 file stream -> Log Line stream -> Log Record stream -> ES
-    */
-    var lineStream = new LineStream();
-    // A stream of log records, from parsing each log line
-    var recordStream = new stream.Transform({objectMode: true})
-    recordStream._transform = function(line, encoding, done) {
-        var logRecord = parse(line.toString());
-        var serializedRecord = JSON.stringify(logRecord);
-        this.push(serializedRecord);
-        totLogLines ++;
-        done();
+    if (logtype == 'alb') {
+        /* == Streams ==
+        * To avoid loading an entire (typically large) log file into memory,
+        * this is implemented as a pipeline of filters, streaming log data
+        * from S3 to ES.
+        * Flow: S3 file stream -> Log Line stream -> Log Record stream -> ES
+        */
+        const lineStream = new LineStream();
+        const recordStream = new stream.Transform({objectMode: true})
+        recordStream._transform = function(line, encoding, done) {
+            const logRecord = albParser(line.toString());
+            const serializedRecord = JSON.stringify(logRecord);
+            this.push(serializedRecord);
+            totLogLines ++;
+            done();
+        }
+    }
+    else if (logtype == 'cdn') {
+        const parser = new CloudFrontParser({ format: 'web' });
+        parser.on('readable', function () {
+            let access;
+            while (access = parser.read()) {
+                postDocumentToES(access, context);
+            }
+        });
     }
 
     event.Records.forEach(function(record) {
         var bucket = record.s3.bucket.name;
         var objKey = decodeURIComponent(record.s3.object.key.replace(/\+/g, ' '));
-        s3LogsToES(bucket, objKey, context, lineStream, recordStream);
+        if (logtype == 'alb') {
+            albLogsToES(bucket, objKey, context, lineStream, recordStream);
+        }
+        else if (logtype == 'cdn') {
+            cdnLogsToES(bucket, objKey, context, parser);
+        }
     });
 }
