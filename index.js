@@ -54,11 +54,30 @@ var creds = new AWS.EnvironmentCredentials('AWS');
 
 console.log('Initializing AWS Lambda Function');
 
+// set up log parsers
+if (logtype == 'alb') {
+    /* == Streams ==
+    * To avoid loading an entire (typically large) log file into memory,
+    * this is implemented as a pipeline of filters, streaming log data
+    * from S3 to ES.
+    * Flow: S3 file stream -> Log Line stream -> Log Record stream -> ES
+    */
+    const lineStream = new LineStream();
+    const recordStream = new stream.Transform({objectMode: true})
+    recordStream._transform = function(line, encoding, done) {
+        const logRecord = albParser(line.toString());
+        const serializedRecord = JSON.stringify(logRecord);
+        this.push(serializedRecord);
+        totLogLines ++;
+        done();
+    }
+}
+
 /*
  * Get the log file from the given S3 bucket and key.  Parse it and add
  * each log record to the ES domain.
  */
-function albLogsToES(bucket, key, context, lineStream, recordStream) {
+function albLogsToES(bucket, key, context) {
     // Note: The Lambda function should be configured to filter for .log files
     // (as part of the Event Source "suffix" setting).
     if (!esEndpoint) {
@@ -90,7 +109,7 @@ function albLogsToES(bucket, key, context, lineStream, recordStream) {
  * Get the log file from the given S3 bucket and key.  Parse it and add
  * each log record to the ES domain.
  */
-function cdnLogsToES(bucket, key, context, parser) {
+function cdnLogsToES(bucket, key, context) {
 
     // Note: The Lambda function should be configured to filter for .log files
     // (as part of the Event Source "suffix" setting).
@@ -100,10 +119,17 @@ function cdnLogsToES(bucket, key, context, parser) {
     }
 
     const s3Stream = s3.getObject({Bucket: bucket, Key: key}).createReadStream();
+    const cfParser = new CloudFrontParser({ format: 'web' });
+    cfParser.on('readable', function () {
+        let access;
+        while (access = cfParser.read()) {
+            postDocumentToES(JSON.stringify(access), context);
+        }
+    });
 
     s3Stream
         .pipe(zlib.createGunzip())
-        .pipe(parser);
+        .pipe(cfParser);
 
     s3Stream.on('error', function(e) {
         console.log(e);
@@ -160,44 +186,18 @@ function postDocumentToES(doc, context) {
 
 /* Lambda "main": Execution starts here */
 exports.handler = function(event, context) {
-    console.log('Received event: ', JSON.stringify(event, null, 2));
-    
 
-    if (logtype == 'alb') {
-        /* == Streams ==
-        * To avoid loading an entire (typically large) log file into memory,
-        * this is implemented as a pipeline of filters, streaming log data
-        * from S3 to ES.
-        * Flow: S3 file stream -> Log Line stream -> Log Record stream -> ES
-        */
-        const lineStream = new LineStream();
-        const recordStream = new stream.Transform({objectMode: true})
-        recordStream._transform = function(line, encoding, done) {
-            const logRecord = albParser(line.toString());
-            const serializedRecord = JSON.stringify(logRecord);
-            this.push(serializedRecord);
-            totLogLines ++;
-            done();
-        }
-    }
-    else if (logtype == 'cdn') {
-        const parser = new CloudFrontParser({ format: 'web' });
-        parser.on('readable', function () {
-            let access;
-            while (access = parser.read()) {
-                postDocumentToES(access, context);
-            }
-        });
-    }
+    console.log('Received event: ', JSON.stringify(event, null, 2));
+    console.log('running in ' + logtype + ' mode');
 
     event.Records.forEach(function(record) {
         var bucket = record.s3.bucket.name;
         var objKey = decodeURIComponent(record.s3.object.key.replace(/\+/g, ' '));
         if (logtype == 'alb') {
-            albLogsToES(bucket, objKey, context, lineStream, recordStream);
+            albLogsToES(bucket, objKey, context);
         }
         else if (logtype == 'cdn') {
-            cdnLogsToES(bucket, objKey, context, parser);
+            cdnLogsToES(bucket, objKey, context);
         }
     });
 }
