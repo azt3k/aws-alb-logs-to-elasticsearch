@@ -54,23 +54,20 @@ var creds = new AWS.EnvironmentCredentials('AWS');
 
 console.log('Initializing AWS Lambda Function');
 
-// set up log parsers
-if (logtype == 'alb') {
-    /* == Streams ==
-    * To avoid loading an entire (typically large) log file into memory,
-    * this is implemented as a pipeline of filters, streaming log data
-    * from S3 to ES.
-    * Flow: S3 file stream -> Log Line stream -> Log Record stream -> ES
-    */
-    const lineStream = new LineStream();
-    const recordStream = new stream.Transform({objectMode: true})
-    recordStream._transform = function(line, encoding, done) {
-        const logRecord = albParser(line.toString());
-        const serializedRecord = JSON.stringify(logRecord);
-        this.push(serializedRecord);
-        totLogLines ++;
-        done();
-    }
+/* == Streams ==
+* To avoid loading an entire (typically large) log file into memory,
+* this is implemented as a pipeline of filters, streaming log data
+* from S3 to ES.
+* Flow: S3 file stream -> Log Line stream -> Log Record stream -> ES
+*/
+const lineStream = new LineStream();
+const recordStream = new stream.Transform({objectMode: true})
+recordStream._transform = function(line, encoding, done) {
+    const logRecord = albParser(line.toString());
+    const serializedRecord = JSON.stringify(logRecord);
+    this.push(serializedRecord);
+    totLogLines ++;
+    done();
 }
 
 /*
@@ -170,6 +167,7 @@ function postDocumentToES(doc, context) {
             body += chunk;
         });
         httpResp.on('end', function (chunk) {
+            console.log(body);
             numDocsAdded ++;
             if (numDocsAdded === totLogLines) {
                 // Mark lambda success.  If not done so, it will be retried.
