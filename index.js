@@ -33,10 +33,10 @@ if (!esEndpoint) {
   endpoint =  new AWS.Endpoint(esEndpoint);
 }
 const region = process.env['region'] || 'eu-west-1';
-const indexPrefix = process.env['index'] || 'elblogs';
-const index = indexPrefix + '-' + indexTimestamp; // adds a timestamp to index. Example: elblogs-2016.03.31
-const doctype = process.env['doctype'] || 'elb-access-logs';
 const logtype = process.env['logtype'] || 'alb';
+const indexPrefix = process.env['index'] || logtype + 'logs';
+const index = indexPrefix + '-' + indexTimestamp; // adds a timestamp to index. Example: elblogs-2016.03.31
+const doctype = process.env['doctype'] || logtype + '-log';
 
 /* Globals */
 var s3 = new AWS.S3();
